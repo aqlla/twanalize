@@ -138,6 +138,7 @@ crashlytics.properties
 crashlytics-build.properties
 
 
+ve/
 tweets/*
 tweets-finished/*
 
