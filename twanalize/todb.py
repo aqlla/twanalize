@@ -1,14 +1,10 @@
-from sqlalchemy import Table, Column, create_engine, select, insert
-from sqlalchemy.dialects.postgresql import ARRAY, BIGINT, BOOLEAN, ENUM, FLOAT, INTEGER, JSON, TEXT, VARCHAR
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Table, create_engine, select, insert, exists
 from sqlalchemy.ext.automap import automap_base
-from sqlalchemy.sql import operators
 from sqlalchemy.orm import Session
-
 import json
+import sys
 import os
 from pprint import pprint
-
 
 def get_connection():
     engine = create_engine('postgresql://acsherrock@localhost:5432/acsherrock')
@@ -18,16 +14,108 @@ def get_tweet_files(directory=""):
     tweet_files = []
     for dirn, subdirs, filelist in os.walk(directory):
         for file in filelist:
-            tweet_files.append(directory + file)
+            tweet_files.append(file)
     return tweet_files
 
-
-def load_tweets():
-    for file in get_tweet_files(directory="../tweets/"):
+def load_tweets(session):
+    for filename in get_tweet_files(directory="tweets/"):
+        file = "tweets/" + filename
         with open(file, 'r') as json_file:
-            data = json.load(json_file)
-            return data
+            try:
+                data = json.load(json_file)
+                if type(data) == type([]):
+                    for t in data:
+                        if 'limit' not in t.keys():
+                            session_add_tweet(session, t)
+                os.rename(file, 'tweets-finished/' + filename)
+            except json.decoder.JSONDecodeError as e:
+                print("Last File: ", file, "\n",  e)
+            except AttributeError as e:
+                print("\nLast File: ", file, "\n", e)
+                sys.exit()
+            except KeyboardInterrupt:
+                print("\nLast File: ", file)
+                sys.exit()
 
+
+
+def is_key(str, dict):
+    return str in dict.keys() and dict[str] is not None and not dict[str] == 'null'
+
+def session_add_user(session, user_json):
+    (row_already_exists, ), = session.query(exists().where(User.id == user_json['id']))
+    if not row_already_exists:
+        user = User(**user_json)
+        session.add(user)
+        session.flush()
+    return user_json['id']
+
+def session_add_coordinates(session, coordinates_json):
+    coord_ids = []
+    if len(coordinates_json) == 2:
+        coord_obj = Coordinates(longitude=coordinates_json[0], latitude=coordinates_json[1])
+        session.add(coord_obj)
+        session.flush()
+        coord_ids.append(coord_obj.id)
+    else:
+        for coord in coordinates_json:
+            coord_obj = Coordinates(longitude=coord[0], latitude=coord[1])
+            session.add(coord_obj)
+            session.flush()
+            coord_ids.append(coord_obj.id)
+    return coord_ids
+
+def session_add_place(session, place_json):
+    (row_already_exists, ), = session.query(exists().where(Place.id == place_json['id']))
+    if not row_already_exists \
+            and is_key('bounding_box', place_json) \
+            and is_key('coordinates', place_json['bounding_box']):
+        place_json['attributes'] = str(place_json['attributes'])
+        coordinate_ids = session_add_coordinates(session, place_json['bounding_box']['coordinates'][0])
+        location = Location(type=place_json['bounding_box']['type'], coordinates=coordinate_ids)
+        session.add(location)
+        session.flush()
+        place_json['bounding_box'] = location.id
+        place = Place(**place_json)
+        session.add(place)
+        session.flush()
+    return place_json['id']
+
+
+def session_add_tweet(session, tweet_json):
+    (row_already_exists, ), = session.query(exists().where(Tweet.id == tweet_json['id']))
+    if not row_already_exists:
+        if is_key('retweeted_status', tweet_json):
+            retweeted_tid = session_add_tweet(session, tweet_json['retweeted_status'])
+            tweet_json['retweeted_status'] = retweeted_tid
+
+        if is_key('quoted_status', tweet_json):
+            quoted_tid = session_add_tweet(session, tweet_json['quoted_status'])
+            tweet_json['quoted_status'] = quoted_tid
+
+        if is_key('coordinates', tweet_json):
+            geo_id = session_add_coordinates(session, tweet_json['coordinates']['coordinates'])
+            tweet_json['coordinates'] = geo_id
+
+        if is_key('geo', tweet_json):
+            geo_id = session_add_coordinates(session, tweet_json['geo']['coordinates'])
+            tweet_json['geo'] = geo_id
+
+        if is_key('place', tweet_json):
+            geo_id = session_add_place(session, tweet_json['place'])
+            tweet_json['place'] = geo_id
+
+        if is_key('scopes', tweet_json):
+            tweet_json['scopes'] = str(tweet_json['scopes'])
+
+        uid = session_add_user(session, tweet_json['user'])
+        tweet_json['entities'] = str(tweet_json['entities'])
+        tweet_json['user'] = uid
+        tweet = Tweet(**tweet_json)
+        session.add(tweet)
+        session.flush()
+        session.commit()
+    return tweet_json['id']
 
 
 
@@ -35,64 +123,11 @@ Base = automap_base()
 engine = create_engine('postgresql://acsherrock@localhost:5432/acsherrock')
 Base.prepare(engine, reflect=True)
 
-
-user_json = load_tweets()['user']
-
-
 User = Base.classes.users
+Tweet = Base.classes.tweets
+Location = Base.classes.location
+Coordinates = Base.classes.coordinates
+Place = Base.classes.places
 session = Session(engine)
-session.add(User(**user_json))
-# session.add(User(id=user_json['id'], name=user_json['name'], screen_name=user_json['screen_name'], description=user_json['description'], default_profile=user_json['default_profile'], default_profile_image=user_json['default_profile_image'], favorites_count=user_json['favourites_count'], followers_count=user_json['followers_count'], friends_count=user_json['friends_count'], geo_enabled=user_json['geo_enabled'], is_translator=user_json['is_translator'], lang=user_json['lang'], listed_count=user_json['listed_count'], notifications=user_json['notifications'], protected=user_json['protected'], show_all_inline_media=user_json['show_all_inline_media'], status=user_json['status'], statuses_count=user_json['statuses_count'], time_zone=user_json['time_zone'], utc_offset=user_json['utc_offset'], verified=user_json['verified'], withheld_in_countried=user_json['withheld_in_countried'], withheld_scope=user_json['withheld_scope'], profile_background_color=user_json['profile_background_color'], profile_background_image_url=user_json['profile_background_image_url'], profile_background_image_url_https=user_json['profile_background_image_url_https'], profile_background_tile=user_json['profile_background_tile'], profile_banner_url=user_json['profile_banner_url'], profile_image_url=user_json['profile_image_url'], profile_image_url_https=user_json['profile_image_url_https'], profile_link_color=user_json['profile_link_color'], profile_sidebar_border_color=user_json['profile_sidebar_border_color'], profile_sidebar_fill_color=user_json['profile_sidebar_fill_color'], profile_text_color=user_json['profile_text_color'], profile_use_background_image=user_json['profile_use_background_image'], entities=user_json['entities'], location=user_json['location']))
+load_tweets(session)
 
-
-
-# # ORM declarative base class
-# Base = declarative_base()
-#
-# class User(Base):
-#     """
-#     User table wrapper class.
-#
-#     """
-#     __tablename__ = 'users'
-#
-#     id = Column(BIGINT, primary_key=True)
-#     name = Column(TEXT)
-#     screen_name = Column(VARCHAR)
-#     description = Column(TEXT)
-#     default_profile = Column(BOOLEAN)
-#     default_profile_image = Column(BOOLEAN)
-#     favorites_count = Column(INTEGER)
-#     followers_count = Column(INTEGER)
-#     friends_count = Column(INTEGER)
-#     geo_enabled = Column(BOOLEAN)
-#     is_translator = Column(BOOLEAN)
-#     lang = Column(TEXT)
-#     listed_count = Column(INTEGER)
-#     notifications = Column(BOOLEAN)
-#     protected = Column(BOOLEAN)
-#     show_all_inline_media = Column(BOOLEAN)
-#     status = Column(BIGINT)
-#     statuses_count = Column(INTEGER)
-#     time_zone = Column(TEXT)
-#     utc_offset = Column(INTEGER)
-#     verified = Column(BOOLEAN)
-#     withheld_in_countried = Column(TEXT)
-#     withheld_scope = Column(TEXT)
-#     profile_background_color = Column(TEXT)
-#     profile_background_image_url = Column(TEXT)
-#     profile_background_image_url_https = Column(TEXT)
-#     profile_background_tile = Column(BOOLEAN)
-#     profile_banner_url = Column(TEXT)
-#     profile_image_url = Column(TEXT)
-#     profile_image_url_https = Column(TEXT)
-#     profile_link_color = Column(TEXT)
-#     profile_sidebar_border_color = Column(TEXT)
-#     profile_sidebar_fill_color = Column(TEXT)
-#     profile_text_color = Column(TEXT)
-#     profile_use_background_image = Column(TEXT)
-#     entities = Column(ARRAY(BIGINT))
-#     location = Column(JSON)
-#
-#     def __repr__(self):
-#         return "<User(id='%s', name='%s')>" % (self.id, self.name)
